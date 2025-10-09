@@ -29,8 +29,7 @@ const extractTextFromDOC = async (filePath) => {
 // Analyze the resume against a job description using Gemini API
 const analyzeResumeWithGemini = async (resumeText, jobDescription) => {
   const apiKey = process.env.GEMINI_API_KEY;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`;
   try {
     const prompt = `Analyze this resume against the job description and provide the following details:
 

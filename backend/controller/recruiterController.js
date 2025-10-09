@@ -8,7 +8,21 @@ const fs = require("fs");
 const getDashboard = async (req, res) => {
   try {
     const recruiter = await Recruiter.findById(req.user.id).select("-password");
-    res.json(recruiter);
+    
+    // Get resume statistics
+    const totalResumes = await ResumeModel.countDocuments({ recruiterId: req.user.id });
+    const shortlistedResumes = await ResumeModel.countDocuments({ 
+      recruiterId: req.user.id, 
+      isShortlisted: true 
+    });
+    
+    res.json({
+      recruiter,
+      stats: {
+        totalResumes,
+        shortlistedResumes
+      }
+    });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -18,11 +32,15 @@ const getDashboard = async (req, res) => {
 const uploadResumes = async (req, res) => {
   try {
     const files = req.files;
+    const recruiterId = req.user.id;
+    
     if (!files || files.length === 0) {
       return res.status(400).json({ error: "No files uploaded" });
     }
 
     const extractedTexts = [];
+    const savedResumes = [];
+    
     for (const file of files) {
       try {
         let text = "";
@@ -55,7 +73,22 @@ const uploadResumes = async (req, res) => {
           throw new Error("Uploaded file does not appear to be a valid resume");
         }
 
-        extractedTexts.push({ filename: file.originalname, text });
+        // Save resume to MongoDB
+        const resume = new ResumeModel({
+          filename: file.originalname,
+          text: text,
+          recruiterId: recruiterId,
+          uploadedAt: new Date()
+        });
+        
+        await resume.save();
+        savedResumes.push(resume);
+        
+        extractedTexts.push({ 
+          filename: file.originalname, 
+          text,
+          _id: resume._id
+        });
       } catch (error) {
         console.error(`Error processing file ${file.originalname}:`, error);
         extractedTexts.push({
@@ -71,6 +104,7 @@ const uploadResumes = async (req, res) => {
     res.status(200).json({
       message: "Resumes uploaded successfully",
       data: extractedTexts,
+      savedCount: savedResumes.length
     });
   } catch (error) {
     console.error("Error uploading resumes:", error);
@@ -82,6 +116,7 @@ const uploadResumes = async (req, res) => {
 const analyzeResumes = async (req, res) => {
   try {
     const { resumes, jobDescription } = req.body;
+    const recruiterId = req.user.id;
 
     if (!resumes || !jobDescription) {
       return res
@@ -90,16 +125,15 @@ const analyzeResumes = async (req, res) => {
     }
 
     const analysisResults = [];
-    const batchSize = 5; // Process 5 resumes at a time
-    const delayBetweenBatches = 5000; // 5 seconds delay between batches
+    const batchSize = 5;
+    const delayBetweenBatches = 5000;
 
     for (let i = 0; i < resumes.length; i += batchSize) {
       const batch = resumes.slice(i, i + batchSize);
 
-      // Process each resume in the batch
       const batchResults = await Promise.all(
         batch.map(async (resume) => {
-          let retries = 3; // Retry up to 3 times
+          let retries = 3;
           while (retries > 0) {
             try {
               const prompt = `
@@ -137,9 +171,8 @@ const analyzeResumes = async (req, res) => {
                 5. Maximum 3-4 points each in Strengths and Weaknesses
                 6. No extra sections or text
               `;
-
               const response = await axios.post(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
                 {
                   contents: [
                     {
@@ -154,21 +187,34 @@ const analyzeResumes = async (req, res) => {
               );
 
               const analysis = response.data.candidates[0].content.parts[0].text;
-              console.log("Gemini Response:", analysis);
-
-              // Parse the response
               const parsedResults = parseAnalysisResponse(analysis);
+
+              // Update resume in MongoDB with analysis results
+              const updatedResume = await ResumeModel.findOneAndUpdate(
+                { filename: resume.filename, recruiterId: recruiterId },
+                {
+                  matchPercentage: parsedResults.matchPercentage,
+                  summary: parsedResults.summary,
+                  strengths: parsedResults.strengths,
+                  weaknesses: parsedResults.weaknesses,
+                  recommendation: parsedResults.recommendation,
+                  isShortlisted: parsedResults.matchPercentage > 70,
+                  jobDescription: jobDescription,
+                  analyzedAt: new Date()
+                },
+                { new: true }
+              );
 
               return {
                 filename: resume.filename,
+                _id: updatedResume?._id,
                 ...parsedResults,
                 isShortlisted: parsedResults.matchPercentage > 70,
               };
             } catch (error) {
               if (error.response?.status === 429 && retries > 0) {
-                // Retry after a delay
                 retries--;
-                await new Promise((resolve) => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying
+                await new Promise((resolve) => setTimeout(resolve, 5000));
               } else {
                 console.error(`Error analyzing resume ${resume.filename}:`, error);
                 return {
@@ -187,7 +233,6 @@ const analyzeResumes = async (req, res) => {
 
       analysisResults.push(...batchResults);
 
-      // Add a delay between batches to avoid rate limiting
       if (i + batchSize < resumes.length) {
         await new Promise((resolve) => setTimeout(resolve, delayBetweenBatches));
       }
@@ -214,19 +259,16 @@ const parseAnalysisResponse = (analysisText) => {
   };
 
   try {
-    // Extract Match Percentage
     const matchPercentageMatch = analysisText.match(/\*\*Match Percentage\*\*:\s*(\d+)%/);
     if (matchPercentageMatch) {
       result.matchPercentage = parseFloat(matchPercentageMatch[1]);
     }
 
-    // Extract Summary
     const summaryMatch = analysisText.match(/\*\*Summary\*\*:\s*([\s\S]*?)(?=\n\s*\*\*Strengths\*\*|\n\s*\*\*Weaknesses\*\*|\n\s*\*\*Recommendation\*\*|$)/);
     if (summaryMatch) {
       result.summary = summaryMatch[1].trim();
     }
 
-    // Extract Strengths
     const strengthsMatch = analysisText.match(/\*\*Strengths\*\*:\s*([\s\S]*?)(?=\n\s*\*\*Weaknesses\*\*|\n\s*\*\*Recommendation\*\*|$)/);
     if (strengthsMatch) {
       result.strengths = strengthsMatch[1]
@@ -235,7 +277,6 @@ const parseAnalysisResponse = (analysisText) => {
         .filter((s) => s.length > 0);
     }
 
-    // Extract Weaknesses
     const weaknessesMatch = analysisText.match(/\*\*Weaknesses\*\*:\s*([\s\S]*?)(?=\n\s*\*\*Recommendation\*\*|$)/);
     if (weaknessesMatch) {
       result.weaknesses = weaknessesMatch[1]
@@ -244,7 +285,6 @@ const parseAnalysisResponse = (analysisText) => {
         .filter((s) => s.length > 0);
     }
 
-    // Extract Recommendation
     const recommendationMatch = analysisText.match(/\*\*Recommendation\*\*:\s*([\s\S]*?)(?=\n|$)/);
     if (recommendationMatch) {
       result.recommendation = recommendationMatch[1].trim();
@@ -253,18 +293,64 @@ const parseAnalysisResponse = (analysisText) => {
     console.error("Error parsing analysis response:", error);
   }
 
-  console.log("Parsed Results:", result);
   return result;
 };
 
 // Get shortlisted resumes
 const getShortlistedResumes = async (req, res) => {
   try {
-    const shortlistedResumes = await ResumeModel.find({ isShortlisted: true });
-    res.status(200).json({ data: shortlistedResumes });
+    const recruiterId = req.user.id;
+    const shortlistedResumes = await ResumeModel.find({ 
+      recruiterId: recruiterId,
+      isShortlisted: true 
+    }).sort({ matchPercentage: -1 });
+    
+    res.status(200).json({ 
+      data: shortlistedResumes,
+      count: shortlistedResumes.length
+    });
   } catch (error) {
     console.error("Error fetching shortlisted resumes:", error);
     res.status(500).json({ error: "Failed to fetch shortlisted resumes" });
+  }
+};
+
+// Get all resumes for a recruiter
+const getAllResumes = async (req, res) => {
+  try {
+    const recruiterId = req.user.id;
+    const resumes = await ResumeModel.find({ recruiterId: recruiterId })
+      .sort({ uploadedAt: -1 });
+    
+    res.status(200).json({ 
+      data: resumes,
+      count: resumes.length
+    });
+  } catch (error) {
+    console.error("Error fetching resumes:", error);
+    res.status(500).json({ error: "Failed to fetch resumes" });
+  }
+};
+
+// Delete a resume
+const deleteResume = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const recruiterId = req.user.id;
+    
+    const resume = await ResumeModel.findOneAndDelete({
+      _id: id,
+      recruiterId: recruiterId
+    });
+    
+    if (!resume) {
+      return res.status(404).json({ error: "Resume not found" });
+    }
+    
+    res.status(200).json({ message: "Resume deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting resume:", error);
+    res.status(500).json({ error: "Failed to delete resume" });
   }
 };
 
@@ -272,5 +358,7 @@ module.exports = {
   uploadResumes,
   analyzeResumes,
   getShortlistedResumes,
+  getAllResumes,
+  deleteResume,
   getDashboard,
 };
