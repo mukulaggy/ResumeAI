@@ -3,6 +3,7 @@ const {
   extractTextFromDOC,
   analyzeResumeWithGemini,
   parseAnalysisResults,
+  extractTextFromJSON
 } = require("../utils/geminiUtils.js");
 
 const multer = require("multer");
@@ -77,11 +78,16 @@ const uploadResume = async (req, res) => {
       // Extract text based on file type
       if (req.file.mimetype === "application/pdf") {
         text = await extractTextFromPDF(req.file.path);
+
       } else if (
         req.file.mimetype === "application/msword" ||
         req.file.mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       ) {
         text = await extractTextFromDOC(req.file.path);
+
+      } else if (req.file.mimetype === "application/json") {
+        text = await extractTextFromJSON(req.file.path);
+
       } else {
         throw new Error("Unsupported file type");
       }

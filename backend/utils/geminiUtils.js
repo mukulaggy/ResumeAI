@@ -99,4 +99,33 @@ const parseAnalysisResults = (analysisText) => {
   return { matchPercentage, missingSkills, suggestions };
 };
 
-module.exports = { extractTextFromPDF, extractTextFromDOC, analyzeResumeWithGemini, parseAnalysisResults };
+// Extract text from a JSON file
+const extractTextFromJSON = async (filePath) => {
+  try {
+    const rawData = fs.readFileSync(filePath, "utf-8");
+    const jsonData = JSON.parse(rawData);
+
+    // Convert JSON into readable text
+    const extractValues = (obj) => {
+      let text = "";
+
+      for (const key in obj) {
+        if (typeof obj[key] === "string") {
+          text += obj[key] + " ";
+        } else if (Array.isArray(obj[key])) {
+          text += obj[key].join(" ") + " ";
+        } else if (typeof obj[key] === "object" && obj[key] !== null) {
+          text += extractValues(obj[key]);
+        }
+      }
+
+      return text;
+    };
+
+    return extractValues(jsonData).trim();
+  } catch (error) {
+    console.error("Error extracting text from JSON:", error);
+    throw error;
+  }
+};
+module.exports = { extractTextFromPDF, extractTextFromDOC, analyzeResumeWithGemini, parseAnalysisResults,extractTextFromJSON};
